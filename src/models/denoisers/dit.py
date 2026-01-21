@@ -222,6 +222,9 @@ class DiT(nn.Module):
         class_dropout_prob=0.1,
         num_datasets=2,  # clf-free guidance input
         num_spacegroups=230,  # clf-free guidance input
+        cond_dim: int = 0,
+        cond_mlp_hidden=None,
+        cond_dropout_prob: float = 0.0,
     ):
         super().__init__()
         self.d_x = d_x
@@ -232,6 +235,15 @@ class DiT(nn.Module):
         self.t_embedder = TimestepEmbedder(d_model)
         self.dataset_embedder = LabelEmbedder(num_datasets, d_model, class_dropout_prob)
         self.spacegroup_embedder = LabelEmbedder(num_spacegroups, d_model, class_dropout_prob)
+        self.cond_embedder = None
+        if cond_dim and cond_dim > 0:
+            hidden = cond_mlp_hidden or d_model
+            self.cond_embedder = nn.Sequential(
+                nn.Linear(cond_dim, hidden, bias=True),
+                nn.SiLU(),
+                nn.Linear(hidden, d_model, bias=True),
+            )
+        self.cond_dropout_prob = float(cond_dropout_prob)
 
         self.blocks = nn.ModuleList(
             [DiTBlock(d_model, nhead, mlp_ratio=mlp_ratio) for _ in range(num_layers)]
@@ -268,16 +280,17 @@ class DiT(nn.Module):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
-    def forward(self, x, t, dataset_idx, spacegroup, mask, x_sc=None):
+    def forward(self, x, t, dataset_idx, spacegroup, mask, x_sc=None, cond_vec=None):
         """Forward pass of DiT.
 
         Args:
             x (torch.Tensor): Input data tensor (B, N, d_in)
-            t (torch.Tensor): Time step for each sample (B,)
-            dataset_idx (torch.Tensor): Dataset index for each sample (B,)
-            spacegroup (torch.Tensor): Spacegroup index for each sample (B,)
+            t (torch.Tensor): Time step for each sample (B,) or (B, 1)
+            dataset_idx (torch.Tensor): Dataset index for each sample (B,) or (B, 1)
+            spacegroup (torch.Tensor): Spacegroup index for each sample (B,) or (B, 1)
             mask (torch.Tensor): True if valid token, False if padding (B, N)
             x_sc (torch.Tensor): Self-conditioning x (B, N, d_in)
+            cond_vec (torch.Tensor): Optional continuous conditioning vector (B, C)
         """
         # Positonal embedding
         token_index = torch.cumsum(mask, dim=-1, dtype=torch.int64) - 1
@@ -289,10 +302,34 @@ class DiT(nn.Module):
         x = self.x_embedder(torch.cat([x, x_sc], dim=-1)) + pos_emb
 
         # Conditioning embeddings
-        t = self.t_embedder(t.squeeze(1))  # (B, d)
+        t = self.t_embedder(t.squeeze(-1))  # (B, d)
+        dataset_idx = dataset_idx.squeeze(-1)
+        spacegroup = spacegroup.squeeze(-1)
+        if self.training and self.dataset_embedder.dropout_prob > 0:
+            if torch.any(dataset_idx == 0):
+                raise ValueError(
+                    "dataset_idx contains 0 (null class) while class_dropout_prob > 0."
+                )
+            if torch.any(spacegroup == 0):
+                raise ValueError(
+                    "spacegroup contains 0 (null class) while class_dropout_prob > 0."
+                )
         d = self.dataset_embedder(dataset_idx, self.training)  # (B, d)
         s = self.spacegroup_embedder(spacegroup, self.training)  # (B, d)
-        c = t + d + s  # (B, 1, d)
+        c = t + d + s  # (B, d)
+        if self.cond_embedder is not None and cond_vec is not None:
+            if cond_vec.dim() == 1:
+                cond_vec = cond_vec.unsqueeze(0)
+            if cond_vec.size(0) == 1 and x.size(0) > 1:
+                cond_vec = cond_vec.expand(x.size(0), -1)
+            if self.training and self.cond_dropout_prob > 0.0:
+                drop_mask = (
+                    torch.rand(cond_vec.size(0), device=cond_vec.device) < self.cond_dropout_prob
+                )
+                if drop_mask.any():
+                    cond_vec = cond_vec.clone()
+                    cond_vec[drop_mask] = 0
+            c = c + self.cond_embedder(cond_vec)
 
         # Transformer blocks
         for block in self.blocks:
@@ -303,7 +340,9 @@ class DiT(nn.Module):
         x = x * mask[..., None]
         return x
 
-    def forward_with_cfg(self, x, t, dataset_idx, spacegroup, mask, cfg_scale, x_sc=None):
+    def forward_with_cfg(
+        self, x, t, dataset_idx, spacegroup, mask, cfg_scale, x_sc=None, cond_vec=None
+    ):
         """Forward pass of DiT, but also batches the unconditional forward pass for classifier-free
         guidance.
 
@@ -312,7 +351,18 @@ class DiT(nn.Module):
         """
         half_x = x[: len(x) // 2]
         combined_x = torch.cat([half_x, half_x], dim=0)
-        model_out = self.forward(combined_x, t, dataset_idx, spacegroup, mask, x_sc)
+        if cond_vec is not None:
+            if cond_vec.dim() == 1:
+                cond_vec = cond_vec.unsqueeze(0)
+            if cond_vec.size(0) == 1 and half_x.size(0) > 1:
+                cond_vec = cond_vec.expand(half_x.size(0), -1)
+            if cond_vec.size(0) == half_x.size(0):
+                cond_vec = torch.cat([cond_vec, torch.zeros_like(cond_vec)], dim=0)
+            elif cond_vec.size(0) != combined_x.size(0):
+                raise ValueError(
+                    "cond_vec batch size must match the conditional batch or the combined batch."
+                )
+        model_out = self.forward(combined_x, t, dataset_idx, spacegroup, mask, x_sc, cond_vec)
 
         cond_eps, uncond_eps = torch.split(model_out, len(model_out) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)

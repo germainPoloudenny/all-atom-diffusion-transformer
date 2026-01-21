@@ -30,6 +30,7 @@ class FlowMatchingInterpolant:
         num_timesteps: int = 100,
         self_condition: bool = False,
         self_condition_prob: float = 0.5,
+        centered: bool = True,
         device: str = "cpu",
     ):
         self.min_t = min_t
@@ -37,6 +38,7 @@ class FlowMatchingInterpolant:
         self.num_timesteps = num_timesteps
         self.self_condition = self_condition
         self.self_condition_prob = self_condition_prob
+        self.centered = centered
         self.device = device
 
     def _sample_t(self, batch_size):
@@ -45,6 +47,8 @@ class FlowMatchingInterpolant:
 
     def _centered_gaussian(self, batch_size, num_tokens, emb_dim=3):
         noise = torch.randn(batch_size, num_tokens, emb_dim, device=self.device)
+        if not self.centered:
+            return noise
         return noise - torch.mean(noise, dim=-2, keepdims=True)
 
     def _corrupt_x(self, x_1, t, token_mask, diffuse_mask):
@@ -108,6 +112,7 @@ class FlowMatchingInterpolant:
         x_1=None,
         token_mask=None,
         token_idx=None,
+        cond_vec=None,
     ):
         """Generates new samples of a specified (B, N, d) using denoiser model.
 
@@ -163,7 +168,7 @@ class FlowMatchingInterpolant:
             # Run denoiser model
             with torch.no_grad():
                 pred_x_1 = model(
-                    x, t, dataset_idx, spacegroup, token_mask, x_sc
+                    x, t, dataset_idx, spacegroup, token_mask, x_sc, cond_vec
                 )
 
             # Process model output
@@ -185,11 +190,11 @@ class FlowMatchingInterpolant:
         else:
             if x_1 is None:
                 raise ValueError("Must provide x_1 if not corrupting.")
-            x = x_1
+            x = torch.cat([x_1, x_1], dim=0)  # (2B, N, d)
         t = torch.ones((batch_size, 1), device=self.device) * t_1
         with torch.no_grad():
             pred_x_1 = model(
-                x, t, dataset_idx, spacegroup, token_mask, x_sc
+                x, t, dataset_idx, spacegroup, token_mask, x_sc, cond_vec
             )
         clean_traj.append(pred_x_1)
         tokens_traj.append(pred_x_1)
@@ -210,6 +215,7 @@ class FlowMatchingInterpolant:
         x_1=None,
         token_mask=None,
         token_idx=None,
+        cond_vec=None,
     ):
         """Generates new samples of a specified (B, N, d) using denoiser model with classifier-free
         guidance.
@@ -254,6 +260,10 @@ class FlowMatchingInterpolant:
         spacegroup_null = torch.zeros_like(spacegroup)
         spacegroup = torch.cat([spacegroup, spacegroup_null], dim=0)  # (2B, 1)
         token_mask = torch.cat([token_mask, token_mask], dim=0)  # (2B, N)
+        if cond_vec is not None:
+            if cond_vec.dim() == 1:
+                cond_vec = cond_vec.unsqueeze(0)
+            cond_vec = torch.cat([cond_vec, torch.zeros_like(cond_vec)], dim=0)
 
         # Set-up time
         if num_timesteps is None:
@@ -279,7 +289,7 @@ class FlowMatchingInterpolant:
             # Run denoiser model
             with torch.no_grad():
                 pred_x_1 = model.forward_with_cfg(
-                    x, t, dataset_idx, spacegroup, token_mask, cfg_scale, x_sc
+                    x, t, dataset_idx, spacegroup, token_mask, cfg_scale, x_sc, cond_vec
                 )
 
             # Process model output
@@ -305,7 +315,7 @@ class FlowMatchingInterpolant:
         t = torch.ones((2 * batch_size, 1), device=self.device) * t_1
         with torch.no_grad():
             pred_x_1 = model.forward_with_cfg(
-                x, t, dataset_idx, spacegroup, token_mask, cfg_scale, x_sc
+                x, t, dataset_idx, spacegroup, token_mask, cfg_scale, x_sc, cond_vec
             )
         clean_traj.append(pred_x_1.chunk(2, dim=0)[0])  # Remove null class samples
         tokens_traj.append(pred_x_1)

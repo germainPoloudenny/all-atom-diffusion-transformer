@@ -1,0 +1,21 @@
+# @package _global_
+
+defaults:
+  - data: xtocif
+  - diffusion_module: latent_ae
+  - callbacks: diffusion_xtocif
+  - logger: null
+  - trainer: ddp
+  - paths: default
+  - extras: default
+  - hydra: default
+  - _self_
+
+name: ""
+task_name: "train_diffusion_xtocif"
+tags: ["xtocif", "latent_ae", "diffusion", "train"]
+
+train: True
+test: True
+ckpt_path: null
+seed: 9
