@@ -7,7 +7,9 @@ from typing import Optional, Sequence
 
 from lightning import LightningDataModule
 from omegaconf import DictConfig
+import torch.distributed as dist
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.nn.utils.rnn import pad_sequence
 
 _XTOCIF_ROOT = Path(__file__).resolve().parents[3]
@@ -29,6 +31,9 @@ class XtoCifDataModule(LightningDataModule):
         dataset_root: str,
         batch_size: DictConfig,
         num_workers: DictConfig,
+        pin_memory: bool = False,
+        persistent_workers: bool = False,
+        prefetch_factor: Optional[int] = None,
         condition: bool = False,
         train_split: str = "train",
         val_split: str = "val",
@@ -77,36 +82,99 @@ class XtoCifDataModule(LightningDataModule):
             log.info(f"Test dataset: {len(self.test_dataset)} samples")
 
     def train_dataloader(self) -> DataLoader:
-        return DataLoader(
+        return self._build_loader(
             dataset=self.train_dataset,
             batch_size=self.hparams.batch_size.train,
             num_workers=self.hparams.num_workers.train,
-            pin_memory=False,
             shuffle=True,
             drop_last=True,
-            collate_fn=self._collate_fn,
         )
 
     def val_dataloader(self) -> Sequence[DataLoader]:
         return [
-            DataLoader(
+            self._build_loader(
                 dataset=self.val_dataset,
                 batch_size=self.hparams.batch_size.val,
                 num_workers=self.hparams.num_workers.val,
-                pin_memory=False,
                 shuffle=False,
-                collate_fn=self._collate_fn,
+                drop_last=False,
             )
         ]
 
     def test_dataloader(self) -> Sequence[DataLoader]:
         return [
-            DataLoader(
+            self._build_loader(
                 dataset=self.test_dataset,
                 batch_size=self.hparams.batch_size.test,
                 num_workers=self.hparams.num_workers.test,
-                pin_memory=False,
                 shuffle=False,
-                collate_fn=self._collate_fn,
+                drop_last=False,
             )
         ]
+
+    def _build_loader(
+        self,
+        dataset: DeciferDataset,
+        batch_size: int,
+        num_workers: int,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> DataLoader:
+        sampler = self._get_distributed_sampler(dataset, shuffle=shuffle, drop_last=drop_last)
+        if sampler is not None:
+            shuffle = False
+            log.info(
+                f"DataLoader uses DistributedSampler (world_size={self._ddp_world_size}, "
+                f"rank={self._ddp_rank}, samples={len(sampler)}, batch_size={batch_size})."
+            )
+        else:
+            log.info(
+                f"DataLoader uses default sampler (world_size={self._ddp_world_size}, "
+                f"rank={self._ddp_rank}, batch_size={batch_size})."
+            )
+        loader_kwargs = {
+            "dataset": dataset,
+            "batch_size": batch_size,
+            "num_workers": num_workers,
+            "pin_memory": bool(self.hparams.pin_memory),
+            "shuffle": shuffle,
+            "drop_last": drop_last,
+            "collate_fn": self._collate_fn,
+        }
+        if sampler is not None:
+            loader_kwargs["sampler"] = sampler
+        if num_workers > 0:
+            loader_kwargs["persistent_workers"] = bool(self.hparams.persistent_workers)
+            if self.hparams.prefetch_factor is not None:
+                loader_kwargs["prefetch_factor"] = int(self.hparams.prefetch_factor)
+        return DataLoader(**loader_kwargs)
+
+    def _get_distributed_sampler(
+        self,
+        dataset: DeciferDataset,
+        *,
+        shuffle: bool,
+        drop_last: bool,
+    ) -> Optional[DistributedSampler]:
+        world_size: Optional[int] = None
+        rank: Optional[int] = None
+        if getattr(self, "trainer", None) is not None:
+            world_size = int(getattr(self.trainer, "world_size", 1))
+            rank = int(getattr(self.trainer, "global_rank", 0))
+        elif dist.is_available() and dist.is_initialized():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+        else:
+            world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            rank = int(os.environ.get("RANK", "0"))
+        self._ddp_world_size = world_size
+        self._ddp_rank = rank
+        if world_size <= 1:
+            return None
+        return DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank or 0,
+            shuffle=shuffle,
+            drop_last=drop_last,
+        )

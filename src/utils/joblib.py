@@ -1,6 +1,6 @@
 """Copyright (c) Meta Platforms, Inc. and affiliates."""
 
-from typing import Iterable, Literal
+from typing import Iterable, Literal, Optional
 
 import tqdm
 from joblib import Parallel, delayed, parallel_config
@@ -48,8 +48,8 @@ class ParallelTqdm(Parallel):
     def __init__(
         self,
         *,
-        total_tasks: int | None = None,
-        desc: str | None = None,
+        total_tasks: Optional[int] = None,
+        desc: Optional[str] = None,
         disable_progressbar: bool = False,
         show_joblib_header: bool = False,
         **kwargs,
@@ -62,7 +62,7 @@ class ParallelTqdm(Parallel):
         self.total_tasks = total_tasks
         self.desc = desc
         self.disable_progressbar = disable_progressbar
-        self.progress_bar: tqdm.tqdm | None = None
+        self.progress_bar: Optional[tqdm.tqdm] = None
 
     def __call__(self, iterable):
         try:
@@ -110,9 +110,9 @@ def joblib_map(
     func: callable,
     iterable: Iterable,
     n_jobs: int = 1,
-    inner_max_num_threads: int | None = None,
-    desc: str | None = None,
-    total: int | None = None,
+    inner_max_num_threads: Optional[int] = None,
+    desc: Optional[str] = None,
+    total: Optional[int] = None,
     backend: Literal["sequential", "loky", "threading", "multiprocessing"] = "loky",
 ) -> list:
     if backend != "loky" and inner_max_num_threads is not None:

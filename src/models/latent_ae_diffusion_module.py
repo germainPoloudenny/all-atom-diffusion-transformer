@@ -172,7 +172,7 @@ class LatentAEDiffusionLitModule(LightningModule):
         self, sequences: torch.Tensor, cond_vec: Optional[torch.Tensor]
     ) -> torch.Tensor:
         encode_batch = self._build_encode_batch(sequences)
-        with torch.no_grad():
+        with torch.inference_mode():
             _, _, latent_state = self.latent_ae(
                 encode_batch, cond_vec=cond_vec, return_latents=True
             )
@@ -302,8 +302,8 @@ class LatentAEDiffusionLitModule(LightningModule):
 
     def setup(self, stage: Optional[str] = None) -> None:
         if self.hparams.compile and stage == "fit":
+            self.latent_ae = torch.compile(self.latent_ae, mode="max-autotune")
             self.denoiser = torch.compile(self.denoiser)
-            self.latent_ae = torch.compile(self.latent_ae)
 
     def configure_optimizers(self) -> Dict[str, Any]:
         optimizer = self.hparams.optimizer(params=self.trainer.model.parameters())

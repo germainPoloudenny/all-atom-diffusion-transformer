@@ -11,7 +11,7 @@ devices: 1
 # limit_train_batches: 0.01 # useful for debugging
 
 # mixed precision for extra speed-up
-# precision: 16
+precision: bf16-mixed
 
 # perform a validation loop every N training epochs
 check_val_every_n_epoch: 250

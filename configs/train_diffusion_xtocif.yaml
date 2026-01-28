@@ -4,7 +4,7 @@ defaults:
   - data: xtocif
   - diffusion_module: latent_ae
   - callbacks: diffusion_xtocif
-  - logger: null
+  - logger: tensorboard
   - trainer: ddp
   - paths: default
   - extras: default
@@ -17,5 +17,22 @@ tags: ["xtocif", "latent_ae", "diffusion", "train"]
 
 train: True
 test: True
-ckpt_path: null
+ckpt_path: /home/gpoloudenny/Projects/XtoCIF/runs/AADit/checkpoints/last.ckpt
 seed: 9
+
+resume:
+  copy_run_dir: false
+
+diffusion_module:
+  compile: false
+
+trainer:
+  sync_batchnorm: false
+  gradient_clip_val: 0.0
+  check_val_every_n_epoch: null
+  val_check_interval: 2000
+  limit_val_batches: 0.7
+
+hydra:
+  run:
+    dir: ${resume_run_dir:${ckpt_path},${paths.log_dir}/${task_name}/runs/${name}_${now:%Y-%m-%d}_${now:%H-%M-%S},${resume.copy_run_dir}}

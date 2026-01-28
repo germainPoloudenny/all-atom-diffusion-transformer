@@ -1,7 +1,7 @@
 _target_: src.models.latent_ae_diffusion_module.LatentAEDiffusionLitModule
 
-latent_ae_ckpt: ${paths.root_dir}/../runs/latent_ae_fair/ckpt.pt
-latent_ae_config: null
+latent_ae_ckpt: ${paths.root_dir}/../XtoCIF/runs/latent_ae_xtocif/ckpt.pt
+latent_ae_config: ${paths.root_dir}/../XtoCIF/configs/latent_ae_xtocif.yaml
 prefer_best: true
 latent_tokens: 32
 latent_dim: 1024
@@ -24,7 +24,7 @@ xrd_augmentation:
 
 denoiser:
   _target_: src.models.denoisers.dit.DiT
-  d_x: ${latent_dim}
+  d_x: ${..latent_dim}
   d_model: 768
   nhead: 12
   num_layers: 12
@@ -47,10 +47,11 @@ optimizer:
   _partial_: true
   lr: 0.0001
   weight_decay: 0.0
+  fused: true
 
 scheduler: null
 
 scheduler_frequency: ${trainer.check_val_every_n_epoch}
 
 # compile model for faster training with pytorch 2.0
-compile: false
+compile: true

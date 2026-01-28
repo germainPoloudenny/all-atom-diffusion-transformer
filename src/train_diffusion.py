@@ -2,6 +2,11 @@
 
 from typing import Any, Dict, List, Optional, Tuple
 
+import inspect
+import os
+import shutil
+from pathlib import Path
+
 import hydra
 import lightning as L
 import rootutils
@@ -41,6 +46,61 @@ from src.utils import (
 log = RankedLogger(__name__, rank_zero_only=True)
 
 
+def _get_resume_run_dir(ckpt_path: str) -> Path:
+    """Infer run directory from a checkpoint path."""
+    path = Path(ckpt_path).expanduser()
+    if path.is_dir():
+        if path.name == "checkpoints":
+            return path.parent
+        return path
+    if path.parent.name == "checkpoints":
+        return path.parent.parent
+    return path.parent
+
+
+def _maybe_copy_resume_dir(cfg: DictConfig) -> None:
+    """Optionally copy previous run directory into the current output dir."""
+    if not cfg.get("ckpt_path"):
+        return
+    resume_cfg = cfg.get("resume")
+    if not resume_cfg or not resume_cfg.get("copy_run_dir"):
+        return
+    if os.environ.get("RANK", "0") != "0" or os.environ.get("LOCAL_RANK", "0") != "0":
+        return
+
+    src_dir = _get_resume_run_dir(cfg.ckpt_path)
+    dst_dir = Path(cfg.paths.output_dir).expanduser()
+
+    try:
+        if src_dir.resolve() == dst_dir.resolve():
+            return
+    except FileNotFoundError:
+        # If the source doesn't exist yet, resolve() can fail; handle below.
+        pass
+
+    if not src_dir.exists():
+        log.warning(
+            f"Resume copy requested but source run dir not found: {src_dir} "
+            f"(ckpt_path={cfg.ckpt_path})"
+        )
+        return
+
+    log.info(f"Copying resume run dir from {src_dir} to {dst_dir} (resume.copy_run_dir=True)")
+    shutil.copytree(src_dir, dst_dir, dirs_exist_ok=True, ignore=shutil.ignore_patterns(".hydra"))
+
+# PyTorch 2.6 flips torch.load default to weights_only=True; Lightning resume needs full ckpt.
+if "weights_only" in inspect.signature(torch.load).parameters:
+    _torch_load = torch.load
+
+    def _torch_load_compat(*args, **kwargs):
+        # Force full checkpoint loading for Lightning resume (PyTorch 2.6+ defaults to weights_only=True).
+        # Lightning may pass weights_only=None, which would still resolve to True inside torch.load.
+        kwargs["weights_only"] = False
+        return _torch_load(*args, **kwargs)
+
+    torch.load = _torch_load_compat
+
+
 @task_wrapper
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Trains the diffusion model for generative modelling.
@@ -56,6 +116,8 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     # set seed for random number generators in pytorch, numpy and python.random
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
+
+    _maybe_copy_resume_dir(cfg)
 
     log.info(f"Instantiating datamodule <{cfg.data.datamodule._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(
@@ -144,4 +206,9 @@ if __name__ == "__main__":
     except ImportError:
         pass
 
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(True)
+
+    torch.set_float32_matmul_precision("high")
     main()
